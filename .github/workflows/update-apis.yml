@@ -1,0 +1,56 @@
+name: Update API Data
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # every Monday at 06:00 UTC
+  workflow_dispatch:       # manual trigger via GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Parse APIs from README
+        run: python parse_apis.py
+
+      - name: Clean and normalize data
+        run: |
+          python - <<'EOF'
+          import json, re
+          from pathlib import Path
+
+          apis = json.loads(Path("apis.json").read_text())
+
+          def clean(a):
+              auth = re.sub(r'`([^`]+)`', r'\1', a.get("auth", "")).strip()
+              https = "Yes" if a.get("https", "").strip() == "Yes" else ("No" if a.get("https", "").strip() == "No" else "Unknown")
+              cors  = "Yes" if a.get("cors",  "").strip() == "Yes" else ("No" if a.get("cors",  "").strip() == "No" else "Unknown")
+              return {**a, "auth": auth, "https": https, "cors": cors}
+
+          cleaned = [clean(a) for a in apis if a.get("category") != "APIs Covered Under APILayer Suite!"]
+          Path("apis_clean.json").write_text(json.dumps(cleaned, indent=2, ensure_ascii=False))
+          print(f"✓ {len(cleaned)} APIs written to apis_clean.json")
+          EOF
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet apis_clean.json apis.json || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push if changed
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          COUNT=$(python -c "import json; print(len(json.load(open('apis_clean.json'))))")
+          git add apis.json apis_clean.json
+          git commit -m "chore: update API data ($COUNT APIs)"
+          git push
